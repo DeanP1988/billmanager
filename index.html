@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Bill Manager</title>
 
   <!-- iOS Safari Standalone Web App Meta Tags -->
@@ -48,6 +48,10 @@
     }
     .font-mono {
       font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    /* Prevent iOS Safari from auto-zooming when tapping inputs */
+    input, select, textarea {
+      font-size: 16px !important;
     }
     /* Hide scrollbar for Chrome, Safari and Opera */
     .scrollbar-none::-webkit-scrollbar {
