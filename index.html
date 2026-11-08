@@ -311,6 +311,9 @@
       }
     }
 
+    // Cached PNG Data URI for safe use across components without crashing
+    const GENERATED_PNG_ICON = generateHighResAppleTouchIcon();
+
     // CLEAN LEDGER: Start with clean slate for the user's real household and rental property bills
     const INITIAL_BILLS = [];
 
@@ -366,9 +369,9 @@
       const [isUpdateSettingsOpen, setIsUpdateSettingsOpen] = useState(false);
       const [githubRepoConfig, setGithubRepoConfig] = useState(() => {
         try {
-          return localStorage.getItem('ios_update_github_repo') || DEFAULT_GITHUB_REPO;
+          return localStorage.getItem('ios_update_github_repo') || '';
         } catch {
-          return DEFAULT_GITHUB_REPO;
+          return '';
         }
       });
 
@@ -379,7 +382,7 @@
         }
 
         // CRITICAL FIX FOR SAFARI: Generate real PNG Data URI for Apple Touch Icon
-        const pngIconUrl = generateHighResAppleTouchIcon();
+        const pngIconUrl = GENERATED_PNG_ICON;
         if (pngIconUrl) {
           // Set Apple Touch Icon links
           const appleIcon = document.getElementById('app-apple-icon');
@@ -578,16 +581,14 @@
       }, [bills]);
 
       // --- COLD START AUTO-UPDATE ENGINE (GITHUB) ---
-      // Runs on genuine cold start (or when reopening app after 20+ minutes)
+      // Runs only on genuine cold start (reopening closed app)
       useEffect(() => {
         const now = Date.now();
         const lastBoot = parseInt(localStorage.getItem('app_last_boot_ts') || '0', 10);
         const sessionChecked = sessionStorage.getItem('app_cold_boot_update_checked');
 
-        // Cold boot triggers if:
-        // 1. Session is completely fresh (tab or app reopened)
-        // 2. Or background elapsed time > 20 minutes (1,200,000 ms)
-        const isColdBoot = !sessionChecked || (now - lastBoot > 1200000);
+        // Cold boot triggers once per session when tab/app is freshly launched
+        const isColdBoot = !sessionChecked || (now - lastBoot > 3600000);
 
         if (isColdBoot) {
           sessionStorage.setItem('app_cold_boot_update_checked', 'true');
@@ -612,7 +613,7 @@
           let cleanRepo = (githubRepoConfig || '').trim();
           
           // Auto-detect owner/repo if hosted on github.io
-          if (!cleanRepo || cleanRepo === DEFAULT_GITHUB_REPO) {
+          if (!cleanRepo) {
             const hostParts = window.location.hostname.split('.');
             if (hostParts.length >= 3 && hostParts[1] === 'github' && hostParts[2] === 'io') {
               const owner = hostParts[0];
@@ -626,14 +627,17 @@
 
           cleanRepo = cleanRepo.replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
 
+          // If no valid repository is specified yet, do not trigger false alarm modals on startup
           if (!cleanRepo || cleanRepo === DEFAULT_GITHUB_REPO) {
             if (isManual) {
-              triggerToast("Please set your GitHub repository in Settings");
+              triggerToast("Set your GitHub repo in Settings first");
               setIsUpdateSettingsOpen(true);
             }
             setIsCheckingUpdate(false);
             return;
           }
+
+          const dismissedVersion = localStorage.getItem('app_dismissed_update_version');
 
           // 1. Check Releases API for latest published tag
           const apiUrl = `https://api.github.com/repos/${cleanRepo}/releases/latest`;
@@ -646,15 +650,18 @@
             const remoteVersion = (data.tag_name || data.name || '').replace(/^v/i, '').trim();
 
             if (remoteVersion && remoteVersion !== APP_VERSION) {
-              setAvailableUpdate({
-                version: remoteVersion,
-                currentVersion: APP_VERSION,
-                changelog: data.body || 'New features, cash flow enhancements, and stability improvements.',
-                date: data.published_at ? new Date(data.published_at).toLocaleDateString() : 'Recent',
-                htmlUrl: data.html_url
-              });
-              setIsUpdateModalOpen(true);
-              return;
+              // Only prompt if user hasn't already dismissed this exact version during this release cycle
+              if (isManual || remoteVersion !== dismissedVersion) {
+                setAvailableUpdate({
+                  version: remoteVersion,
+                  currentVersion: APP_VERSION,
+                  changelog: data.body || 'New features, cash flow enhancements, and stability improvements.',
+                  date: data.published_at ? new Date(data.published_at).toLocaleDateString() : 'Recent',
+                  htmlUrl: data.html_url
+                });
+                setIsUpdateModalOpen(true);
+                return;
+              }
             }
           }
 
@@ -668,22 +675,25 @@
             const commits = await commitRes.json();
             if (commits && commits.length > 0) {
               const latestSha = commits[0].sha.substring(0, 7);
-              const localSha = localStorage.getItem('app_installed_commit_sha');
+              const installedSha = localStorage.getItem('app_installed_commit_sha');
 
-              // If there's an existing registered commit SHA and it differs, trigger update prompt
-              if (localSha && localSha !== latestSha) {
-                setAvailableUpdate({
-                  version: `Commit #${latestSha}`,
-                  currentVersion: `Commit #${localSha}`,
-                  changelog: commits[0].commit?.message || 'New updates available on repository.',
-                  date: new Date(commits[0].commit?.author?.date).toLocaleDateString(),
-                  htmlUrl: commits[0].html_url
-                });
-                setIsUpdateModalOpen(true);
-                return;
-              } else if (!localSha) {
-                // Seed local commit tracking on initial fetch
+              // On first initialization, pin the current commit SHA as installed to avoid immediate prompt
+              if (!installedSha) {
                 localStorage.setItem('app_installed_commit_sha', latestSha);
+              } else if (installedSha !== latestSha) {
+                // Only prompt if this new commit was not dismissed
+                if (isManual || latestSha !== dismissedVersion) {
+                  setAvailableUpdate({
+                    version: `Commit #${latestSha}`,
+                    rawSha: latestSha,
+                    currentVersion: `Commit #${installedSha}`,
+                    changelog: commits[0].commit?.message || 'New updates deployed to repository.',
+                    date: new Date(commits[0].commit?.author?.date).toLocaleDateString(),
+                    htmlUrl: commits[0].html_url
+                  });
+                  setIsUpdateModalOpen(true);
+                  return;
+                }
               }
             }
           }
@@ -718,10 +728,9 @@
             await Promise.all(cacheKeys.map(key => caches.delete(key)));
           }
 
-          // 3. Mark the new version or commit as current
-          if (availableUpdate?.version?.startsWith('Build #')) {
-            const newSha = availableUpdate.version.replace('Build #', '');
-            localStorage.setItem('app_installed_commit_sha', newSha);
+          // 3. Mark the new commit as installed so it won't prompt again
+          if (availableUpdate?.rawSha) {
+            localStorage.setItem('app_installed_commit_sha', availableUpdate.rawSha);
           }
 
           setIsUpdateModalOpen(false);
@@ -734,6 +743,17 @@
           console.error("Update deployment error:", e);
           window.location.reload(true);
         }
+      };
+
+      // User chose to skip this specific update
+      const handleSkipUpdate = () => {
+        if (availableUpdate) {
+          const versionToDismiss = availableUpdate.rawSha || availableUpdate.version;
+          if (versionToDismiss) {
+            localStorage.setItem('app_dismissed_update_version', versionToDismiss);
+          }
+        }
+        setIsUpdateModalOpen(false);
       };
 
       const requestNotificationPermission = async () => {
@@ -1107,8 +1127,12 @@
                   : 'bg-white/95 border-black/10 text-zinc-900 shadow-xl'
               }`}>
                 {/* App Icon matching Home Screen */}
-                <div className="w-10 h-10 rounded-xl overflow-hidden flex-shrink-0 shadow-sm border border-white/10">
-                  <img src={APP_HOME_ICON_SVG} alt="Bill Manager" className="w-full h-full object-cover" />
+                <div className="w-10 h-10 rounded-xl overflow-hidden flex-shrink-0 shadow-sm border border-white/10 bg-blue-900/40">
+                  {GENERATED_PNG_ICON ? (
+                    <img src={GENERATED_PNG_ICON} alt="Bill Manager" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-blue-600 flex items-center justify-center text-white font-bold text-xs">$</div>
+                  )}
                 </div>
                 <div className="flex-1 min-w-0 pr-1">
                   <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-0.5">
@@ -1279,10 +1303,10 @@
                           className={`group relative snap-start flex-shrink-0 flex items-center gap-2.5 pl-2.5 pr-3.5 py-2 rounded-2xl transition-all duration-300 active:scale-95 text-left border ${
                             isSelected
                               ? isDarkMode
-                                ? 'bg-gradient-to-b from-[#2A2B30] to-[#1E1F24] text-white border-blue-500/50 shadow-lg ring-1.5 ring-blue-500'
-                                : 'bg-white text-zinc-900 border-blue-500/40 shadow-md ring-1.5 ring-blue-600'
+                                ? 'bg-gradient-to-b from-[#2A2B30] to-[#1E1F24] text-white border-blue-500/50 shadow-[0_4px_16px_rgba(0,0,0,0.5)] ring-1.5 ring-blue-500'
+                                : 'bg-white text-zinc-900 border-blue-500/40 shadow-[0_4px_16px_rgba(0,0,0,0.08)] ring-1.5 ring-blue-600'
                               : isDarkMode
-                                ? 'bg-[#1C1C1E]/80 hover:bg-[#252528] text-zinc-300 border-white/5 backdrop-blur-md'
+                                ? 'bg-[#1C1C1E]/80 hover:bg-[#252528] text-zinc-300 border-white/5 backdrop-blur-md shadow-xs'
                                 : 'bg-white/80 hover:bg-white text-zinc-700 border-black/5 backdrop-blur-md shadow-xs'
                           }`}
                         >
@@ -1302,7 +1326,9 @@
                           </div>
 
                           <div className="leading-tight">
-                            <span className="text-xs font-semibold block tracking-tight">
+                            <span className={`text-xs font-semibold block tracking-tight ${
+                              isSelected ? (isDarkMode ? 'text-white' : 'text-zinc-950') : ''
+                            }`}>
                               {p.name}
                             </span>
                             <div className="flex items-center gap-1.5 mt-0.5 text-[10px]">
@@ -2594,7 +2620,7 @@
                     </button>
 
                     <button
-                      onClick={() => setIsUpdateModalOpen(false)}
+                      onClick={handleSkipUpdate}
                       className="w-full py-2.5 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold text-xs active:scale-95 transition-all"
                     >
                       No, Skip for Now
