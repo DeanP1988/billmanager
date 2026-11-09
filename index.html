@@ -119,7 +119,7 @@
 
     // RASTER PNG GENERATOR: Converts the high-fidelity 3D artwork to PNG Data URI
     // Safari strictly requires PNG for Apple Touch Icons (it ignores SVG)
-    function generateHighResAppleTouchIcon() {
+    function generateHighResAppleTouchIcon(badgeCount = 0) {
       try {
         const size = 192;
         const canvas = document.createElement('canvas');
@@ -226,7 +226,7 @@
         ctx.lineTo(calX + calW, calY + calH - calR);
         ctx.quadraticCurveTo(calX + calW, calY + calH, calX + calW - calR, calY + calH);
         ctx.lineTo(calX + calR, calY + calH);
-        ctx.quadraticCurveTo(calX, calY + calH, calX, calY + calH - calR);
+        ctx.quadraticCurveTo(calX, calY, calX + calH, calY + calH - calR);
         ctx.lineTo(calX, calY + calR);
         ctx.quadraticCurveTo(calX, calY, calX + calR, calY);
         ctx.closePath();
@@ -284,25 +284,30 @@
         ctx.lineTo(143, 50);
         ctx.stroke();
 
-        // Notification Badge ("1") in Gold (Top Edge)
-        const bX = 160;
-        const bY = 36;
-        ctx.beginPath();
-        ctx.arc(bX, bY, 16, 0, Math.PI * 2);
-        const badgeGrad = ctx.createLinearGradient(bX - 16, bY - 16, bX + 16, bY + 16);
-        badgeGrad.addColorStop(0, '#fde047');
-        badgeGrad.addColorStop(1, '#ca8a04');
-        ctx.fillStyle = badgeGrad;
-        ctx.fill();
-        ctx.strokeStyle = '#08111d';
-        ctx.lineWidth = 3;
-        ctx.stroke();
+        // NATIVE RED NOTIFICATION BADGE:
+        // Rendered when badgeCount > 0, matching Apple's iOS Red Alert (#FF3B30)
+        if (badgeCount > 0) {
+          const bX = 158;
+          const bY = 34;
+          const badgeRadius = 18;
+          ctx.beginPath();
+          ctx.arc(bX, bY, badgeRadius, 0, Math.PI * 2);
+          const badgeGrad = ctx.createLinearGradient(bX - badgeRadius, bY - badgeRadius, bX + badgeRadius, bY + badgeRadius);
+          badgeGrad.addColorStop(0, '#FF453A');
+          badgeGrad.addColorStop(1, '#D70015');
+          ctx.fillStyle = badgeGrad;
+          ctx.fill();
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
 
-        ctx.fillStyle = '#451a03';
-        ctx.font = 'bold 16px -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('1', bX, bY + 1);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 16px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const text = badgeCount > 99 ? '99+' : badgeCount.toString();
+          ctx.fillText(text, bX, bY + 1);
+        }
 
         return canvas.toDataURL('image/png');
       } catch (e) {
@@ -311,8 +316,8 @@
       }
     }
 
-    // Cached PNG Data URI for safe use across components without crashing
-    const GENERATED_PNG_ICON = generateHighResAppleTouchIcon();
+    // Default icon without badge for initial head load
+    const GENERATED_PNG_ICON = generateHighResAppleTouchIcon(0);
 
     // CLEAN LEDGER: Start with clean slate for the user's real household and rental property bills
     const INITIAL_BILLS = [];
@@ -361,6 +366,7 @@
       const [notificationPermission, setNotificationPermission] = useState('default');
       const [mockBannerNotification, setMockBannerNotification] = useState(null);
       const [toastMessage, setToastMessage] = useState(null);
+      const [activeBadgeCount, setActiveBadgeCount] = useState(0);
 
       // --- AUTO-UPDATE & GITHUB RELEASE ENGINE STATE ---
       const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
@@ -484,6 +490,43 @@
         const diff = target.getTime() - today.getTime();
         return Math.ceil(diff / (1000 * 60 * 60 * 24));
       };
+
+      // --- NATIVE iOS SAFARI HOME SCREEN BADGING ENGINE ---
+      // Counts all bills that are within 3 days of being due OR overdue, and puts that number in the red badge
+      useEffect(() => {
+        // Calculate bills due in <= 3 days or already overdue
+        const urgentCount = bills.filter(b => {
+          if (b.status === 'Paid') return false;
+          const daysLeft = getDaysDiff(b.dueDate);
+          return daysLeft <= 3;
+        }).length;
+
+        setActiveBadgeCount(urgentCount);
+
+        // 1. Native Web App Badging API (iOS 16.4+ standalone Home Screen PWA)
+        if ('setAppBadge' in navigator) {
+          if (urgentCount > 0) {
+            navigator.setAppBadge(urgentCount).catch(err => {
+              console.debug("navigator.setAppBadge error:", err);
+            });
+          } else {
+            navigator.clearAppBadge().catch(err => {
+              console.debug("navigator.clearAppBadge error:", err);
+            });
+          }
+        }
+
+        // 2. Synchronize dynamically generated Apple Touch Icon with Red Badge
+        const dynamicIconUrl = generateHighResAppleTouchIcon(urgentCount);
+        if (dynamicIconUrl) {
+          const appleIcon = document.getElementById('app-apple-icon');
+          if (appleIcon) appleIcon.setAttribute('href', dynamicIconUrl);
+          const appleIconPre = document.getElementById('app-apple-icon-pre');
+          if (appleIconPre) appleIconPre.setAttribute('href', dynamicIconUrl);
+          const favIcon = document.getElementById('app-favicon');
+          if (favIcon) favIcon.setAttribute('href', dynamicIconUrl);
+        }
+      }, [bills]);
 
       // --- BILL NOTIFICATION ENGINE (5d, 3d, 1d, and daily overdue) ---
       const triggerSystemNotification = (title, body, tag) => {
@@ -2548,6 +2591,26 @@
                         <Icon name="refresh-cw" className="h-3.5 w-3.5" />
                         <span>Run Due Check Now</span>
                       </button>
+
+                      {/* Home Screen Red Badge Info & Simulator */}
+                      <div className={`p-3 rounded-2xl border ${
+                        activeBadgeCount > 0 
+                          ? 'bg-red-500/10 border-red-500/20 text-red-300' 
+                          : 'bg-zinc-800/40 border-zinc-800 text-zinc-400'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-[11px] flex items-center gap-1.5">
+                            <span className="h-2 w-2 rounded-full bg-red-500 inline-block animate-pulse" />
+                            Home Screen Red Badge:
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full bg-red-600 text-white font-bold text-xs">
+                            {activeBadgeCount > 0 ? `${activeBadgeCount} Due in ≤3d` : '0 (Clear)'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-zinc-400 mt-1 leading-tight">
+                          Shows an authentic red badge directly over the app icon on your iPhone Home Screen when bills are within 3 days of due date.
+                        </p>
+                      </div>
 
                       <button
                         onClick={() => {
